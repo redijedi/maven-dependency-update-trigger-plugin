@@ -29,11 +29,11 @@ import hudson.maven.MavenModuleSet;
 import hudson.model.AbstractProject;
 import hudson.model.BuildableItem;
 import hudson.model.Cause;
-import hudson.model.FreeStyleProject;
 import hudson.model.Hudson;
 import hudson.model.Item;
 import hudson.model.JDK;
 import hudson.model.Node;
+import hudson.model.Project;
 import hudson.model.TopLevelItem;
 import hudson.remoting.VirtualChannel;
 import hudson.scheduler.CronTabList;
@@ -42,6 +42,7 @@ import hudson.tasks.Maven;
 import hudson.triggers.Trigger;
 import hudson.triggers.TriggerDescriptor;
 import hudson.util.FormValidation;
+
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.lang.SystemUtils;
@@ -57,12 +58,16 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.TimeZone;
 import java.util.logging.Logger;
 
 import static hudson.Util.fixNull;
@@ -102,7 +107,7 @@ public class MavenDependencyUpdateTrigger
         {
             // FIXME schedule the first buid ??
             //job.scheduleBuild( arg0, arg1 )
-            LOGGER.info( "no previous build found so skip maven update trigger" );
+            LOGGER.info( "no previous build found for " + job.getDisplayName() + " so skip maven update trigger" );
             return;
         }
 
@@ -150,9 +155,11 @@ public class MavenDependencyUpdateTrigger
             {
                 LOGGER.info( "MavenUpdateChecker with jdkHome:" + jdkHome );
             }
+            
+            long lastBuildTime = getLastBuildStartTime(abstractProject);
             MavenUpdateChecker checker =
                 new MavenUpdateChecker( rootPomPath, localRepoPath, this.checkPlugins, projectWorkspace, isMaster,
-                                        mavenHome, jdkHome );
+                                        mavenHome, jdkHome, lastBuildTime);
             if ( isMaster )
             {
                 checker.setClassLoaderParent( (PluginFirstClassLoader) pluginWrapper.classLoader );
@@ -213,6 +220,21 @@ public class MavenDependencyUpdateTrigger
         {
             Thread.currentThread().setContextClassLoader( origClassLoader );
         }
+    }
+
+    private long getLastBuildStartTime(AbstractProject<?,?> abstractProject)
+    {
+        TimeZone tz = abstractProject.getLastBuild().getTimestamp().getTimeZone();
+        long timestamp = abstractProject.getLastBuild().getStartTimeInMillis();
+        Calendar calDate = Calendar.getInstance(tz);
+        calDate.setTimeInMillis(timestamp);
+        Date localTime = calDate.getTime();
+
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmmss");
+        sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+        String utcString = sdf.format(localTime);
+        
+        return Long.valueOf(utcString);
     }
 
     private File getLocalRepo( FilePath workspace )
@@ -308,51 +330,52 @@ public class MavenDependencyUpdateTrigger
 
     private boolean usePrivateRepo()
     {
-        // check if FreeStyleProject
-        if ( this.job instanceof FreeStyleProject )
+        boolean usePrivate = false;
+
+        Project<?,?> fp = (Project<?,?>) this.job;
+        for ( Builder b : fp.getBuilders() )
         {
-            FreeStyleProject fp = (FreeStyleProject) this.job;
-            for ( Builder b : fp.getBuilders() )
+            if ( b instanceof Maven )
             {
-                if ( b instanceof Maven )
+                if ( ( (Maven) b ).usePrivateRepository )
                 {
-                    if ( ( (Maven) b ).usePrivateRepository )
-                    {
-                        return true;
-                    }
+                    usePrivate = true;
                 }
             }
-            return false;
-        }
-        // check if there is a method called usesPrivateRepository
-        try
-        {
-            Method method = this.job.getClass().getMethod( "usesPrivateRepository", null );
-            Boolean bool = (Boolean) method.invoke( this.job, null );
-            return bool.booleanValue();
-        }
-        catch ( SecurityException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( NoSuchMethodException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( IllegalArgumentException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( IllegalAccessException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( InvocationTargetException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
         }
 
-        return false;
+        // check if there is a method called usesPrivateRepository
+        if (!usePrivate)
+        {
+            try
+            {
+                Method method = this.job.getClass().getMethod( "usesPrivateRepository", (Class<?>) null );
+                Boolean bool = (Boolean) method.invoke( this.job, (Object[]) null );
+                return bool.booleanValue();
+            }
+            catch ( SecurityException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( NoSuchMethodException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( IllegalArgumentException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( IllegalAccessException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( InvocationTargetException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+        }
+
+        return usePrivate;
     }
 
     private Map<String, MavenProject> getProjectMap( List<MavenProject> projects )
@@ -370,237 +393,238 @@ public class MavenDependencyUpdateTrigger
 
     private FilePath getAlternateSettings( VirtualChannel virtualChannel )
     {
+        FilePath altSettings = null;
         //-s,--settings or from configuration for maven native project
-        // check if FreeStyleProject
-        if ( this.job instanceof FreeStyleProject )
+
+        Project<?,?> fp = (Project<?,?>) this.job;
+        for ( Builder b : fp.getBuilders() )
         {
-            FreeStyleProject fp = (FreeStyleProject) this.job;
-            for ( Builder b : fp.getBuilders() )
+            if ( b instanceof Maven )
             {
-                if ( b instanceof Maven )
+                String targets = ( (Maven) b ).getTargets();
+                String[] args = Util.tokenize( targets );
+                if ( args == null )
                 {
-                    String targets = ( (Maven) b ).getTargets();
-                    String[] args = Util.tokenize( targets );
-                    if ( args == null )
-                    {
-                        return null;
-                    }
-                    CommandLine cli = getCommandLine( args );
-                    if ( cli != null && cli.hasOption( CLIManager.ALTERNATE_USER_SETTINGS ) )
-                    {
-                        return new FilePath( virtualChannel, cli.getOptionValue( CLIManager.ALTERNATE_POM_FILE ) );
-                    }
+                    altSettings = null;
+                }
+                CommandLine cli = getCommandLine( args );
+                if ( cli != null && cli.hasOption( CLIManager.ALTERNATE_USER_SETTINGS ) )
+                {
+                    altSettings = new FilePath( virtualChannel, cli.getOptionValue( CLIManager.ALTERNATE_POM_FILE ) );
                 }
             }
-            return null;
         }
 
         // check if there is a method called getAlternateSettings
-        try
+        if (altSettings == null)
         {
-            Method method = this.job.getClass().getMethod( "getAlternateSettings", null );
-            String alternateSettings = (String) method.invoke( this.job, null );
-            return alternateSettings != null ? new FilePath( virtualChannel, alternateSettings ) : null;
-        }
-        catch ( SecurityException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( NoSuchMethodException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( IllegalArgumentException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( IllegalAccessException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( InvocationTargetException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
+            try
+            {
+                Method method = this.job.getClass().getMethod( "getAlternateSettings", (Class<?>) null );
+                String alternateSettings = (String) method.invoke( this.job, (Object[]) null );
+                altSettings = alternateSettings != null ? new FilePath( virtualChannel, alternateSettings ) : null;
+            }
+            catch ( SecurityException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( NoSuchMethodException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( IllegalArgumentException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( IllegalAccessException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( InvocationTargetException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
         }
 
-        return null;
+        return altSettings;
     }
 
     private FilePath getGlobalSettings( VirtualChannel virtualChannel )
     {
         //-gs,--global-settings
-        if ( this.job instanceof FreeStyleProject )
+        FilePath globalSettings = null;
+
+        Project<?,?> fp = (Project<?,?>) this.job;
+        for ( Builder b : fp.getBuilders() )
         {
-            FreeStyleProject fp = (FreeStyleProject) this.job;
-            for ( Builder b : fp.getBuilders() )
+            if ( b instanceof Maven )
             {
-                if ( b instanceof Maven )
+                String targets = ( (Maven) b ).getTargets();
+                String[] args = Util.tokenize( targets );
+                if ( args == null )
                 {
-                    String targets = ( (Maven) b ).getTargets();
-                    String[] args = Util.tokenize( targets );
-                    if ( args == null )
-                    {
-                        return null;
-                    }
-                    CommandLine cli = getCommandLine( args );
-                    if ( cli != null && cli.hasOption( CLIManager.ALTERNATE_GLOBAL_SETTINGS ) )
-                    {
-                        return new FilePath( virtualChannel,
-                                             cli.getOptionValue( CLIManager.ALTERNATE_GLOBAL_SETTINGS ) );
-                    }
+                    globalSettings = null;
+                }
+                CommandLine cli = getCommandLine( args );
+                if ( cli != null && cli.hasOption( CLIManager.ALTERNATE_GLOBAL_SETTINGS ) )
+                {
+                    globalSettings = new FilePath( virtualChannel,
+                                         cli.getOptionValue( CLIManager.ALTERNATE_GLOBAL_SETTINGS ) );
                 }
             }
-            return null;
         }
-        return null;
+        return globalSettings;
     }
 
     private Properties getUserProperties()
         throws IOException
     {
-        if ( this.job instanceof FreeStyleProject )
+        Properties props = new Properties();
+        Project<?,?> fp = (Project<?,?>) this.job;
+        for ( Builder b : fp.getBuilders() )
         {
-            FreeStyleProject fp = (FreeStyleProject) this.job;
-            for ( Builder b : fp.getBuilders() )
+            if ( b instanceof Maven )
             {
-                if ( b instanceof Maven )
-                {
-                    String properties = ( (Maven) b ).properties;
-                    return load( properties );
-                }
+                String properties = ( (Maven) b ).properties;
+                props = load( properties );
             }
         }
-        return new Properties();
+        return props;
     }
 
     private Properties load( String properties )
         throws IOException
     {
         Properties p = new Properties();
-        p.load( new ByteArrayInputStream( properties.getBytes() ) );
+        if (properties != null)
+        {
+            p.load( new ByteArrayInputStream( properties.getBytes() ) );
+        }
         return p;
     }
 
     private String getRootPomPath()
     {
+        String rootPomPath = null;
 
-        if ( this.job instanceof FreeStyleProject )
+        Project<?,?> p = (Project<?,?>) this.job;
+        for ( Builder b : p.getBuilders() )
         {
-            FreeStyleProject fp = (FreeStyleProject) this.job;
-            for ( Builder b : fp.getBuilders() )
+            if ( b instanceof Maven )
             {
-                if ( b instanceof Maven )
-                {
-                    String targets = ( (Maven) b ).getTargets();
-                    String[] args = Util.tokenize( targets );
+                String targets = ( (Maven) b ).getTargets();
+                String[] args = Util.tokenize( targets );
 
-                    if ( args == null )
-                    {
-                        return null;
-                    }
-                    CommandLine cli = getCommandLine( args );
-                    if ( cli != null && cli.hasOption( CLIManager.ALTERNATE_POM_FILE ) )
-                    {
-                        return cli.getOptionValue( CLIManager.ALTERNATE_POM_FILE );
-                    }
+                if ( args == null )
+                {
+                    rootPomPath = null;
+                }
+                CommandLine cli = getCommandLine( args );
+                if ( cli != null && cli.hasOption( CLIManager.ALTERNATE_POM_FILE ) )
+                {
+                    rootPomPath = cli.getOptionValue( CLIManager.ALTERNATE_POM_FILE );
                 }
             }
-            return null;
         }
 
         // check if there is a method called getRootPOM
-        try
+        if (rootPomPath == null)
         {
-            Method method = this.job.getClass().getMethod( "getRootPOM", null );
-            String rootPom = (String) method.invoke( this.job, null );
-            return rootPom;
-        }
-        catch ( SecurityException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( NoSuchMethodException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( IllegalArgumentException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( IllegalAccessException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( InvocationTargetException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
+            try
+            {
+                Method method = this.job.getClass().getMethod( "getRootPOM", (Class<?>) null );
+                String rootPom = (String) method.invoke( this.job, (Object[]) null );
+                rootPomPath = rootPom;
+            }
+            catch ( SecurityException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( NoSuchMethodException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( IllegalArgumentException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( IllegalAccessException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( InvocationTargetException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
         }
 
-        return "pom.xml";
+        return rootPomPath == null ? "pom.xml" : rootPomPath;
     }
 
     private List<String> getActiveProfiles()
     {
-        if ( this.job instanceof FreeStyleProject )
-        {
-            FreeStyleProject fp = (FreeStyleProject) this.job;
-            for ( Builder b : fp.getBuilders() )
-            {
-                if ( b instanceof Maven )
-                {
-                    String targets = ( (Maven) b ).getTargets();
-                    String[] args = Util.tokenize( targets );
+        List<String> activeProfiles = null;
 
-                    if ( args == null )
-                    {
-                        return null;
-                    }
-                    CommandLine cli = getCommandLine( args );
-                    if ( cli != null && cli.hasOption( CLIManager.ACTIVATE_PROFILES ) )
-                    {
-                        return Arrays.asList( cli.getOptionValues( CLIManager.ACTIVATE_PROFILES ) );
-                    }
+        Project<?,?> p = (Project<?,?>) this.job;
+        for ( Builder b : p.getBuilders() )
+        {
+            if ( b instanceof Maven )
+            {
+                String targets = ( (Maven) b ).getTargets();
+                String[] args = Util.tokenize( targets );
+
+                if ( args == null )
+                {
+                    activeProfiles = null;
+                }
+                CommandLine cli = getCommandLine( args );
+                if ( cli != null && cli.hasOption( CLIManager.ACTIVATE_PROFILES ) )
+                {
+                    activeProfiles = Arrays.asList( cli.getOptionValues( CLIManager.ACTIVATE_PROFILES ) );
                 }
             }
-            return Collections.emptyList();
         }
+
         // check if there is a method called getGoals
-        try
+        if (activeProfiles == null)
         {
-            Method method = this.job.getClass().getMethod( "getGoals", null );
-            String goals = (String) method.invoke( this.job, null );
-            String[] args = Util.tokenize( goals );
-            if ( args == null )
+            try
             {
-                return null;
+                Method method = this.job.getClass().getMethod( "getGoals", (Class<?>) null );
+                String goals = (String) method.invoke( this.job, (Object[]) null );
+                String[] args = Util.tokenize( goals );
+                if ( args == null )
+                {
+                    activeProfiles = Collections.emptyList();
+                }
+                CommandLine cli = getCommandLine( args );
+                if ( cli != null && cli.hasOption( CLIManager.ACTIVATE_PROFILES ) )
+                {
+                    activeProfiles = Arrays.asList( cli.getOptionValues( CLIManager.ACTIVATE_PROFILES ) );
+                }
             }
-            CommandLine cli = getCommandLine( args );
-            if ( cli != null && cli.hasOption( CLIManager.ACTIVATE_PROFILES ) )
+            catch ( SecurityException e )
             {
-                return Arrays.asList( cli.getOptionValues( CLIManager.ACTIVATE_PROFILES ) );
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( NoSuchMethodException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( IllegalArgumentException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( IllegalAccessException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
+            }
+            catch ( InvocationTargetException e )
+            {
+                LOGGER.warning( "ignore " + e.getMessage() );
             }
         }
-        catch ( SecurityException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( NoSuchMethodException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( IllegalArgumentException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( IllegalAccessException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        catch ( InvocationTargetException e )
-        {
-            LOGGER.warning( "ignore " + e.getMessage() );
-        }
-        return Collections.emptyList();
+        return activeProfiles;
     }
 
     private CommandLine getCommandLine( String[] args )
@@ -618,47 +642,47 @@ public class MavenDependencyUpdateTrigger
 
     private Maven.MavenInstallation getMavenInstallation()
     {
+        Maven.MavenInstallation installation = null;
 
-        if ( this.job instanceof FreeStyleProject )
+        if ( this.job instanceof MavenModuleSet )
         {
-            FreeStyleProject fp = (FreeStyleProject) this.job;
+            installation = ( (MavenModuleSet) this.job ).getMaven();
+        }
+
+        if (installation == null)
+        {
+            Project<?,?> fp = (Project<?,?>) this.job;
             for ( Builder b : fp.getBuilders() )
             {
                 if ( b instanceof Maven )
                 {
-                    return ( (Maven) b ).getMaven();
+                    installation = ( (Maven) b ).getMaven();
                 }
             }
-            // null so return first found
-            for ( Maven.MavenInstallation i : MavenModuleSet.DESCRIPTOR.getMavenDescriptor().getInstallations() )
+            if (installation == null)
             {
-                return i;
+                // null so return first found
+                for ( Maven.MavenInstallation i : MavenModuleSet.DESCRIPTOR.getMavenDescriptor().getInstallations() )
+                {
+                    installation = i;
+                }
             }
-            return null;
         }
 
-        if ( this.job instanceof MavenModuleSet )
-        {
-            return ( (MavenModuleSet) this.job ).getMaven();
-        }
-        // ouch :-)
-        return null;
+        return installation;
     }
 
     private JDK getJDK()
     {
-        if ( this.job instanceof FreeStyleProject )
-        {
-            FreeStyleProject fp = (FreeStyleProject) this.job;
-            return fp.getJDK();
-        }
-
+        JDK jdk = null;
         if ( this.job instanceof MavenModuleSet )
         {
-            return ( (MavenModuleSet) this.job ).getJDK();
+            jdk = ( (MavenModuleSet) this.job ).getJDK();
         }
-        // ouch :-)
-        return null;
+        Project<?,?> fp = (Project<?,?>) this.job;
+        jdk = fp.getJDK();
+
+        return jdk;
     }
 
 }

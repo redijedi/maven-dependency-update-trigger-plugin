@@ -19,6 +19,8 @@
  */
 package org.jvnet.hudson.plugins.mavendepsupdate.util;
 
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.StringUtils;
 import org.jvnet.hudson.plugins.mavendepsupdate.MavenDependencyUpdateTrigger;
 import org.sonatype.aether.transfer.TransferCancelledException;
@@ -26,6 +28,7 @@ import org.sonatype.aether.transfer.TransferEvent;
 import org.sonatype.aether.transfer.TransferListener;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
@@ -41,11 +44,23 @@ public class SnapshotTransfertListener
     implements TransferListener, Serializable
 {
     private static final Logger LOGGER = Logger.getLogger( SnapshotTransfertListener.class.getName() );
+    
+    private final Long lastBuild;
 
     private boolean snapshotDownloaded = false;
 
     private List<String> snapshots = new ArrayList<String>();
 
+    public SnapshotTransfertListener()
+    {
+        this.lastBuild = Long.MAX_VALUE;
+    }
+
+    public SnapshotTransfertListener(Long lastBuild)
+    {
+        this.lastBuild = lastBuild;
+    }
+    
     public void transferCorrupted( TransferEvent transferEvent )
         throws TransferCancelledException
     {
@@ -83,9 +98,7 @@ public class SnapshotTransfertListener
             if ( file != null && transferEvent.getResource().getResourceName().contains( "SNAPSHOT" ) )
             {
                 // filtering on maven metadata
-                boolean isArtifact =
-                    !StringUtils.contains( file.getName(), "maven-metadata" ) && !StringUtils.endsWith( file.getName(),
-                                                                                                        ".xml" );
+                boolean isArtifact = !isMetaData( file );
                 if ( isArtifact )
                 {
                     if ( MavenDependencyUpdateTrigger.debug )
@@ -97,9 +110,19 @@ public class SnapshotTransfertListener
                 }
                 else
                 {
-                    if ( MavenDependencyUpdateTrigger.debug )
-                    {
-                        LOGGER.info( "ignore file " + file.getName() );
+                    try {
+                        String fileContents = FileUtils.readFileToString(file);
+                        String lastUpdatedString = StringUtils.substringBetween(fileContents, "<lastUpdated>", "</lastUpdated>");
+                        long lastUpdated = Long.valueOf(lastUpdatedString);
+                        if (lastUpdated >= this.lastBuild)
+                        {
+                            snapshots.add( file.getName() );
+                            snapshotDownloaded = true;
+                        }
+                    }
+                    catch (IOException e) {
+                        // TODO Auto-generated catch block
+                        e.printStackTrace();
                     }
                 }
             }
@@ -115,4 +138,10 @@ public class SnapshotTransfertListener
     {
         return snapshots;
     }
+    
+    private boolean isMetaData(File file)
+    {
+        return StringUtils.contains( file.getName(), "maven-metadata" ) && StringUtils.endsWith( file.getName(), ".xml" );
+    }
+    
 }

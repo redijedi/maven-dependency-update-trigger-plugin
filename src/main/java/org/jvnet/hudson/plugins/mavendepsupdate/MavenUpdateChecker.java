@@ -101,6 +101,8 @@ public class MavenUpdateChecker
 
     private final boolean masterRun;
 
+    private final Long lastBuildTime;
+
     //---------------------------------------
     // optionnal parameters
     //---------------------------------------
@@ -123,7 +125,7 @@ public class MavenUpdateChecker
     private String mavenHome;
 
     public MavenUpdateChecker( String rootPomPath, String localRepoPath, boolean checkPlugins, String projectWorkspace,
-                               boolean masterRun, String mavenHome, String jdkHome )
+                               boolean masterRun, String mavenHome, String jdkHome, long lastBuildTime )
     {
         this.rootPomPath = rootPomPath;
         this.localRepoPath = localRepoPath;
@@ -132,6 +134,7 @@ public class MavenUpdateChecker
         this.masterRun = masterRun;
         this.mavenHome = mavenHome;
         this.jdkHome = jdkHome;
+        this.lastBuildTime = lastBuildTime;
     }
 
     public MavenUpdateCheckerResult call()
@@ -360,31 +363,14 @@ public class MavenUpdateChecker
 
         session.setUpdatePolicy( RepositoryPolicy.UPDATE_POLICY_ALWAYS );
 
-        SnapshotTransfertListener snapshotTransfertListener = new SnapshotTransfertListener();
+        SnapshotTransfertListener snapshotTransfertListener = new SnapshotTransfertListener(this.lastBuildTime);
         session.setTransferListener( snapshotTransfertListener );
 
-        LocalRepository localRepo = null;
-        if ( StringUtils.isEmpty( localRepoPath ) )
-        {
-            localRepo = new LocalRepository( settingsBuildingResult.getEffectiveSettings().getLocalRepository() );
-        }
-        else
-        {
-            localRepo = new LocalRepository( localRepoPath );
-        }
+        LocalRepository localRepo = getLocalRepo(settingsBuildingResult);
 
         session.setLocalRepositoryManager( repoSystem.newLocalRepositoryManager( localRepo ) );
 
-        ArtifactRepository localArtifactRepository = null;
-        if ( StringUtils.isEmpty( localRepoPath ) )
-        {
-            localArtifactRepository = repositorySystem.createLocalRepository(
-                new File( settingsBuildingResult.getEffectiveSettings().getLocalRepository() ) );
-        }
-        else
-        {
-            localArtifactRepository = repositorySystem.createLocalRepository( new File( localRepoPath ) );
-        }
+        ArtifactRepository localArtifactRepository = getLocalArtifactRepo(settingsBuildingResult, repositorySystem);
 
         request.setLocalRepository( localArtifactRepository );
 
@@ -402,6 +388,51 @@ public class MavenUpdateChecker
 
         ProjectBuildingRequest projectBuildingRequest = request.getProjectBuildingRequest();
         return projectBuildingRequest.setRepositorySession( session );
+    }
+
+    private ArtifactRepository getLocalArtifactRepo(SettingsBuildingResult settingsBuildingResult, RepositorySystem repositorySystem)
+        throws InvalidRepositoryException
+    {
+        ArtifactRepository localArtifactRepository = null;
+        if ( StringUtils.isEmpty( localRepoPath ) )
+        {
+            if (settingsBuildingResult.getEffectiveSettings().getLocalRepository() == null)
+            {
+                localArtifactRepository = repositorySystem.createLocalRepository(
+                    new File( System.getProperty( "user.home" ), ".m2/repository" ) );
+            }
+            else
+            {
+                localArtifactRepository = repositorySystem.createLocalRepository(
+                    new File( settingsBuildingResult.getEffectiveSettings().getLocalRepository() ) );
+            }
+        }
+        else
+        {
+            localArtifactRepository = repositorySystem.createLocalRepository( new File( localRepoPath ) );
+        }
+        return localArtifactRepository;
+    }
+
+    private LocalRepository getLocalRepo(SettingsBuildingResult settingsBuildingResult)
+    {
+        LocalRepository localRepo = null;
+        if ( StringUtils.isEmpty( localRepoPath ) )
+        {
+            localRepo = new LocalRepository( settingsBuildingResult.getEffectiveSettings().getLocalRepository() );
+            if (localRepo.getBasedir() == null) {
+                localRepo = new LocalRepository( new File( System.getProperty( "user.home" ), ".m2" ).getAbsolutePath() );
+            }
+        }
+        else
+        {
+            localRepo = new LocalRepository( localRepoPath );
+        }
+        if (localRepo == null || localRepo.getBasedir() == null)
+        {
+            LOGGER.warning("could not locate local repo");
+        }
+        return localRepo;
     }
 
     private Map<String, MavenProject> getProjectMap( List<MavenProject> projects )
